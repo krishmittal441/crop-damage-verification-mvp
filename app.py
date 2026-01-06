@@ -1,5 +1,6 @@
 import ee
 import streamlit as st
+import json
 import datetime
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
@@ -8,8 +9,15 @@ from reportlab.lib.pagesizes import A4
 # ----------------------------------
 # INITIALIZE EARTH ENGINE
 # ----------------------------------
-ee.Initialize(project=st.secrets["EE_PROJECT"])
 
+service_account_info = json.loads(st.secrets["EE_SERVICE_ACCOUNT"])
+
+credentials = ee.ServiceAccountCredentials(
+    service_account_info["client_email"],
+    key_data=st.secrets["EE_SERVICE_ACCOUNT"]
+)
+
+ee.Initialize(credentials, project=st.secrets["EE_PROJECT"])
 
 # ----------------------------------
 # STREAMLIT CONFIG
@@ -208,3 +216,4 @@ if st.button("🔍 Analyze Damage", use_container_width=True):
             mime="application/pdf"
 
         )
+
