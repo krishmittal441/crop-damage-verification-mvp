@@ -8,7 +8,8 @@ from reportlab.lib.pagesizes import A4
 # ----------------------------------
 # INITIALIZE EARTH ENGINE
 # ----------------------------------
-ee.Initialize(project="soy-audio-481413-t3")
+ee.Initialize(project=st.secrets["EE_PROJECT"])
+
 
 # ----------------------------------
 # STREAMLIT CONFIG
@@ -205,4 +206,5 @@ if st.button("🔍 Analyze Damage", use_container_width=True):
             data=f,
             file_name=pdf_file,
             mime="application/pdf"
+
         )
