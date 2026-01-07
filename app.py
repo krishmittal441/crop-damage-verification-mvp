@@ -7,9 +7,8 @@ from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.pagesizes import A4
 
 # ----------------------------------
-# INITIALIZE EARTH ENGINE
+# INITIALIZE EARTH ENGINE (SERVICE ACCOUNT)
 # ----------------------------------
-
 service_account_info = json.loads(st.secrets["EE_SERVICE_ACCOUNT"])
 
 credentials = ee.ServiceAccountCredentials(
@@ -17,7 +16,9 @@ credentials = ee.ServiceAccountCredentials(
     key_data=st.secrets["EE_SERVICE_ACCOUNT"]
 )
 
-ee.Initialize(credentials, project=st.secrets["EE_PROJECT"])
+ee.Initialize(credentials)
+
+
 
 # ----------------------------------
 # STREAMLIT CONFIG
@@ -214,6 +215,4 @@ if st.button("🔍 Analyze Damage", use_container_width=True):
             data=f,
             file_name=pdf_file,
             mime="application/pdf"
-
         )
-
