@@ -42,7 +42,12 @@ st.markdown("### Location Details")
 
 lat = st.number_input("Latitude", value=28.7041, format="%.6f")
 lon = st.number_input("Longitude", value=77.1025, format="%.6f")
-
+radius_km = st.selectbox(
+    "Analysis Area Radius",
+    options=[0.5, 1, 2],
+    index=1,
+    help="Smaller radius = more field-level accuracy"
+)
 st.divider()
 
 # ----------------------------------
@@ -96,9 +101,9 @@ if damage_start <= baseline_end:
 # ----------------------------------
 # DAMAGE ANALYSIS FUNCTION
 # ----------------------------------
-def analyze_damage(lat, lon, b_start, b_end, d_start, d_end):
+def analyze_damage(lat, lon,radius_km, b_start, b_end, d_start, d_end):
 
-    aoi = ee.Geometry.Point([lon, lat]).buffer(5000)
+    aoi = ee.Geometry.Point([lon, lat]).buffer(radius_km * 1000)
 
     def safe_ndvi(start, end):
         collection = (
@@ -169,7 +174,7 @@ if st.button("🔍 Analyze Damage", use_container_width=True):
 
     with st.spinner("Analyzing satellite data..."):
         ndvi_change = analyze_damage(
-            lat, lon,
+            lat, lon,radius_km,
             baseline_start, baseline_end,
             damage_start, damage_end
         )
