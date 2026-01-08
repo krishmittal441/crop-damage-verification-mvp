@@ -6,237 +6,169 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.pagesizes import A4
 
-# ----------------------------------
-# INITIALIZE EARTH ENGINE
-# ----------------------------------
+# -------------------------------------------------
+# EARTH ENGINE INIT (SERVICE ACCOUNT)
+# -------------------------------------------------
 service_account_info = json.loads(st.secrets["EE_SERVICE_ACCOUNT"])
 
 credentials = ee.ServiceAccountCredentials(
     service_account_info["client_email"],
     key_data=st.secrets["EE_SERVICE_ACCOUNT"]
 )
-
 ee.Initialize(credentials)
 
-# ----------------------------------
+# -------------------------------------------------
 # STREAMLIT CONFIG
-# ----------------------------------
+# -------------------------------------------------
 st.set_page_config(page_title="Crop Damage Verification", layout="centered")
 
-# ----------------------------------
-# HEADER
-# ----------------------------------
 st.title("🛰️ Satellite-Based Crop Damage Verification")
-st.subheader("Optical + Radar (SAR) based assessment")
+st.subheader("Government & Insurance Decision Support")
 st.divider()
 
-# ----------------------------------
+# -------------------------------------------------
 # LOCATION INPUT
-# ----------------------------------
-lat = st.number_input("Latitude", value=27.25, format="%.6f")
-lon = st.number_input("Longitude", value=94.10, format="%.6f")
+# -------------------------------------------------
+lat = st.number_input("Latitude", value=26.2, format="%.6f")
+lon = st.number_input("Longitude", value=93.8, format="%.6f")
+radius_km = st.selectbox("AOI Radius (km)", [0.5, 1, 2, 5], index=1)
 
-radius_km = st.selectbox(
-    "Analysis Radius (km)",
-    options=[0.5, 1, 2],
-    index=0
+# -------------------------------------------------
+# DATE INPUT
+# -------------------------------------------------
+st.info(
+    "📌 Use WIDE windows during disasters (especially monsoon regions).\n\n"
+    "Baseline: at least 2–3 weeks before event\n"
+    "Damage: at least 2–3 weeks after event"
 )
 
-st.divider()
+baseline_start = st.date_input("Baseline Start", datetime.date(2023, 6, 1))
+baseline_end   = st.date_input("Baseline End", datetime.date(2023, 6, 20))
 
-# ----------------------------------
-# DATE INPUTS (EVENT-CENTRIC)
-# ----------------------------------
-baseline_start = st.date_input("Baseline Start Date", datetime.date(2023, 6, 1))
-baseline_end = st.date_input("Baseline End Date", datetime.date(2023, 6, 20))
+damage_start = st.date_input("Damage Start", datetime.date(2023, 7, 5))
+damage_end   = st.date_input("Damage End", datetime.date(2023, 7, 30))
 
-damage_start = st.date_input("Event Window Start", datetime.date(2023, 7, 10))
-damage_end = st.date_input("Event Window End", datetime.date(2023, 7, 18))
-
-# ----------------------------------
-# VALIDATION
-# ----------------------------------
-if baseline_start >= baseline_end:
-    st.error("Invalid baseline dates")
+if baseline_start >= baseline_end or damage_start >= damage_end:
+    st.error("Invalid date range")
     st.stop()
 
-if damage_start >= damage_end:
-    st.error("Invalid event dates")
-    st.stop()
-
-if damage_start <= baseline_end:
-    st.error("Event must be after baseline")
-    st.stop()
-
-# ----------------------------------
-# ANALYSIS FUNCTION
-# ----------------------------------
+# -------------------------------------------------
+# CORE ANALYSIS FUNCTION
+# -------------------------------------------------
 def analyze_damage(lat, lon, radius_km, b_start, b_end, d_start, d_end):
 
     aoi = ee.Geometry.Point([lon, lat]).buffer(radius_km * 1000)
 
-    # ---------- OPTICAL (Sentinel-2) ----------
-    def optical_index(start, end, bands, name):
+    # -------------------------
+    # OPTICAL (SENTINEL-2)
+    # -------------------------
+    def get_optical(start, end):
         col = (
-            ee.ImageCollection("COPERNICUS/S2")
+            ee.ImageCollection("COPERNICUS/S2_SR")
             .filterBounds(aoi)
-            .filterDate(str(start), str(end))
-            .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 80))
-            .select(bands)
+            .filterDate(start, end)
+            .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 70))
         )
+        count = col.size()
 
-        size = col.size()
-
-        return ee.Algorithms.If(
-            size.gt(0),
-            ee.Image(col.sort("CLOUDY_PIXEL_PERCENTAGE").first())
-            .normalizedDifference(bands)
-            .rename(name),
+        image = ee.Algorithms.If(
+            count.gt(0),
+            col.median()
+              .normalizedDifference(["B8", "B4"]).rename("NDVI")
+              .addBands(col.median().normalizedDifference(["B3", "B8"]).rename("NDWI")),
             None
         )
 
-    # ---------- SAR (Sentinel-1) ----------
-    def sar_vv(start, end):
+        return image, count
+
+    nd_before, cnt_b = get_optical(b_start, b_end)
+    nd_after, cnt_a = get_optical(d_start, d_end)
+
+    # -------------------------
+    # SAR (SENTINEL-1)
+    # -------------------------
+    def get_sar(start, end):
         col = (
             ee.ImageCollection("COPERNICUS/S1_GRD")
             .filterBounds(aoi)
-            .filterDate(str(start), str(end))
+            .filterDate(start, end)
             .filter(ee.Filter.eq("instrumentMode", "IW"))
             .filter(ee.Filter.listContains("transmitterReceiverPolarisation", "VV"))
-            .filter(ee.Filter.eq("orbitProperties_pass", "DESCENDING"))
             .select("VV")
         )
+        count = col.size()
+        image = ee.Algorithms.If(count.gt(0), col.median().rename("SAR"), None)
+        return image, count
 
-        size = col.size()
+    sar_before, sar_b = get_sar(b_start, b_end)
+    sar_after, sar_a = get_sar(d_start, d_end)
 
-        return ee.Algorithms.If(size.gt(0), col.mean(), None)
+    # -------------------------
+    # CHANGE COMPUTATION
+    # -------------------------
+    results = {}
 
-    try:
-        # Optical indices
-        ndvi_before = optical_index(b_start, b_end, ["B8", "B4"], "NDVI")
-        ndvi_after = optical_index(d_start, d_end, ["B8", "B4"], "NDVI")
-
-        ndwi_before = optical_index(b_start, b_end, ["B3", "B8"], "NDWI")
-        ndwi_after = optical_index(d_start, d_end, ["B3", "B8"], "NDWI")
-
-        # SAR windows (WIDER by design)
-        sar_before = sar_vv(
-            b_start - datetime.timedelta(days=10),
-            b_end + datetime.timedelta(days=10)
-        )
-
-        sar_after = sar_vv(
-            d_start - datetime.timedelta(days=10),
-            d_end + datetime.timedelta(days=10)
-        )
-
-        images = []
-
-        if ndvi_before and ndvi_after:
-            images.append(ndvi_after.subtract(ndvi_before))
-
-        if ndwi_before and ndwi_after:
-            images.append(ndwi_after.subtract(ndwi_before))
-
-        if sar_before and sar_after:
-            images.append(sar_after.subtract(sar_before).rename("SAR"))
-
-        if len(images) == 0:
-            return None
-
-        stats = ee.Image.cat(images).reduceRegion(
+    if nd_before and nd_after:
+        diff = ee.Image(nd_after).subtract(ee.Image(nd_before))
+        stats = diff.reduceRegion(
             reducer=ee.Reducer.mean(),
             geometry=aoi,
             scale=10,
             maxPixels=1e13
         )
+        results["NDVI Change"] = stats.get("NDVI").getInfo()
+        results["NDWI Change"] = stats.get("NDWI").getInfo()
+    else:
+        results["NDVI Change"] = None
+        results["NDWI Change"] = None
 
-        return {
-            "ndvi": ee.Number(stats.get("NDVI", 0)).getInfo(),
-            "ndwi": ee.Number(stats.get("NDWI", 0)).getInfo(),
-            "sar": ee.Number(stats.get("SAR", 0)).getInfo()
-        }
+    if sar_before and sar_after:
+        sar_diff = ee.Image(sar_after).subtract(ee.Image(sar_before))
+        sar_stats = sar_diff.reduceRegion(
+            reducer=ee.Reducer.mean(),
+            geometry=aoi,
+            scale=10,
+            maxPixels=1e13
+        )
+        results["SAR Change"] = sar_stats.get("SAR").getInfo()
+    else:
+        results["SAR Change"] = None
 
-    except Exception:
-        return None
+    results["Optical Images (Before)"] = cnt_b.getInfo()
+    results["Optical Images (After)"] = cnt_a.getInfo()
+    results["SAR Images (Before)"] = sar_b.getInfo()
+    results["SAR Images (After)"] = sar_a.getInfo()
 
-# ----------------------------------
-# PDF FUNCTION
-# ----------------------------------
-def generate_pdf(data):
-    file_name = "Crop_Damage_Report.pdf"
-    doc = SimpleDocTemplate(file_name, pagesize=A4)
-    styles = getSampleStyleSheet()
-    story = []
+    return results
 
-    story.append(Paragraph("<b>Crop Damage Verification Report</b>", styles["Title"]))
-    story.append(Spacer(1, 12))
-
-    for k, v in data.items():
-        story.append(Paragraph(f"<b>{k}:</b> {v}", styles["Normal"]))
-        story.append(Spacer(1, 6))
-
-    doc.build(story)
-    return file_name
-
-# ----------------------------------
-# RUN ANALYSIS
-# ----------------------------------
+# -------------------------------------------------
+# RUN
+# -------------------------------------------------
 if st.button("🔍 Analyze Damage", use_container_width=True):
 
-    with st.spinner("Analyzing satellite data (optical + SAR)..."):
+    with st.spinner("Processing satellite data..."):
         results = analyze_damage(
             lat, lon, radius_km,
             baseline_start, baseline_end,
             damage_start, damage_end
         )
 
-    if results is None:
-        st.warning(
-            "No usable optical or SAR data found for this area and period. "
-            "This can happen due to orbit gaps or extreme cloud cover."
-        )
-        st.stop()
+    st.subheader("📊 Results")
 
-    ndvi = results["ndvi"]
-    ndwi = results["ndwi"]
-    sar = results["sar"]
+    st.json(results)
 
-    # ---------- DECISION LOGIC ----------
-    if sar < -1.5:
-        verdict = "🔵 Flood Detected (SAR-confirmed)"
-        explanation = "Radar backscatter dropped significantly, indicating inundation."
-    elif ndwi > 0.15:
-        verdict = "🔵 Possible Waterlogging (Optical)"
-        explanation = "NDWI indicates excess surface water."
-    elif ndvi < -0.15:
-        verdict = "🟠 Vegetation Stress Detected"
-        explanation = "NDVI decline detected."
+    # -------------------------
+    # INTERPRETATION
+    # -------------------------
+    if results["NDWI Change"] is not None and results["NDWI Change"] < -0.05:
+        st.error("🌊 Flood / Surface Water Detected (NDWI)")
+    elif results["NDVI Change"] is not None and results["NDVI Change"] < -0.15:
+        st.warning("🌾 Vegetation Stress Detected (NDVI)")
+    elif results["SAR Change"] is not None and abs(results["SAR Change"]) > 1:
+        st.warning("📡 Surface Change Detected (SAR)")
     else:
-        verdict = "🟢 No Significant Satellite-Visible Damage"
-        explanation = "No strong optical or radar damage signal."
+        st.success("No strong damage signal detected")
 
-    st.success("Analysis Complete")
-
-    c1, c2, c3 = st.columns(3)
-    c1.metric("NDVI Change", round(ndvi, 3))
-    c2.metric("NDWI Change", round(ndwi, 3))
-    c3.metric("SAR VV Change (dB)", round(sar, 2))
-
-    st.info(explanation)
-
-    pdf = generate_pdf({
-        "Latitude": lat,
-        "Longitude": lon,
-        "Radius (km)": radius_km,
-        "Baseline Period": f"{baseline_start} to {baseline_end}",
-        "Event Period": f"{damage_start} to {damage_end}",
-        "NDVI Change": round(ndvi, 3),
-        "NDWI Change": round(ndwi, 3),
-        "SAR VV Change (dB)": round(sar, 2),
-        "Assessment": verdict,
-        "Satellites Used": "Sentinel-2 (Optical), Sentinel-1 (SAR)"
-    })
-
-    with open(pdf, "rb") as f:
-        st.download_button("Download Report (PDF)", f, pdf)
+    st.caption(
+        "⚠️ Optical may fail during heavy clouds. SAR is authoritative during floods."
+    )
