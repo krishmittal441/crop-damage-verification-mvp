@@ -7,7 +7,7 @@ from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.pagesizes import A4
 
 # ----------------------------------
-# INITIALIZE EARTH ENGINE (SERVICE ACCOUNT)
+# INITIALIZE EARTH ENGINE
 # ----------------------------------
 service_account_info = json.loads(st.secrets["EE_SERVICE_ACCOUNT"])
 
@@ -21,10 +21,7 @@ ee.Initialize(credentials)
 # ----------------------------------
 # STREAMLIT CONFIG
 # ----------------------------------
-st.set_page_config(
-    page_title="Crop Damage Verification",
-    layout="centered"
-)
+st.set_page_config(page_title="Crop Damage Verification", layout="centered")
 
 # ----------------------------------
 # HEADER
@@ -40,11 +37,11 @@ st.markdown("### Location Details")
 
 lat = st.number_input("Latitude", value=28.7041, format="%.6f")
 lon = st.number_input("Longitude", value=77.1025, format="%.6f")
+
 radius_km = st.selectbox(
     "Analysis Area Radius (km)",
     options=[0.5, 1, 2],
-    index=1,
-    help="Smaller radius = more field-level accuracy"
+    index=1
 )
 
 st.divider()
@@ -53,131 +50,109 @@ st.divider()
 # DATE TIP
 # ----------------------------------
 st.info(
-    "📌 *Date Selection Tip*\n\n"
-    "• Keep *Baseline dates at least 7 days BEFORE the event*\n"
-    "• Keep *Damage Assessment dates at least 7 days AFTER the event*\n\n"
-    "This improves satellite accuracy and avoids cloud/noise issues."
+    "📌 Date Selection Tip\n\n"
+    "• Baseline ≥ 7 days BEFORE event\n"
+    "• Damage window ≥ 7 days AFTER event\n"
 )
 
 # ----------------------------------
-# BASELINE PERIOD
+# DATE INPUTS
 # ----------------------------------
-st.markdown("### Step 1: Baseline Crop Health (Before Event)")
+baseline_start = st.date_input("Baseline Start Date", datetime.date(2023, 6, 1))
+baseline_end = st.date_input("Baseline End Date", datetime.date(2023, 6, 20))
 
-baseline_start = st.date_input("Baseline Start Date", value=datetime.date(2024, 6, 1))
-baseline_end = st.date_input("Baseline End Date (Just Before Event)", value=datetime.date(2024, 6, 20))
-
-st.divider()
-
-# ----------------------------------
-# DAMAGE PERIOD
-# ----------------------------------
-st.markdown("### Step 2: Damage Assessment Period (After Event)")
-
-damage_start = st.date_input("Damage Assessment Start Date (After Event)", value=datetime.date(2024, 7, 1))
-damage_end = st.date_input("Damage Assessment End Date", value=datetime.date(2024, 7, 20))
-
-st.divider()
+damage_start = st.date_input("Damage Start Date", datetime.date(2023, 7, 10))
+damage_end = st.date_input("Damage End Date", datetime.date(2023, 7, 18))
 
 # ----------------------------------
-# DATE VALIDATIONS
+# VALIDATIONS
 # ----------------------------------
 if baseline_start >= baseline_end:
-    st.error("❌ Baseline start date must be earlier than baseline end date.")
+    st.error("Baseline dates invalid")
     st.stop()
 
 if damage_start >= damage_end:
-    st.error("❌ Damage assessment start date must be earlier than its end date.")
+    st.error("Damage dates invalid")
     st.stop()
 
 if damage_start <= baseline_end:
-    st.error("❌ Damage assessment must start AFTER baseline period.")
+    st.error("Damage period must be after baseline")
     st.stop()
 
 # ----------------------------------
-# DAMAGE ANALYSIS FUNCTION (NDVI + NDWI)
+# ANALYSIS FUNCTION (NULL-SAFE)
 # ----------------------------------
 def analyze_damage(lat, lon, radius_km, b_start, b_end, d_start, d_end):
 
     aoi = ee.Geometry.Point([lon, lat]).buffer(radius_km * 1000)
 
-    def safe_index(start, end, bands, name):
-        collection = (
+    def compute_index(start, end, bands, name):
+        col = (
             ee.ImageCollection("COPERNICUS/S2")
             .filterBounds(aoi)
-            .filterDate(ee.Date(str(start)), ee.Date(str(end)))
-            .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 80))
+            .filterDate(str(start), str(end))
+            .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 60))
             .select(bands)
         )
 
-        size = collection.size()
+        image = ee.Image(col.sort("CLOUDY_PIXEL_PERCENTAGE").first())
+        return image.normalizedDifference(bands).rename(name)
 
-        def compute():
-            image = collection.median()
-            return image.normalizedDifference(bands).rename(name)
+    try:
+        ndvi_before = compute_index(b_start, b_end, ["B8", "B4"], "NDVI")
+        ndvi_after = compute_index(d_start, d_end, ["B8", "B4"], "NDVI")
 
-        return ee.Algorithms.If(size.gt(0), compute(), None)
+        ndwi_before = compute_index(b_start, b_end, ["B3", "B8"], "NDWI")
+        ndwi_after = compute_index(d_start, d_end, ["B3", "B8"], "NDWI")
 
-    # NDVI
-    ndvi_before = safe_index(b_start, b_end, ["B8", "B4"], "NDVI")
-    ndvi_after = safe_index(d_start, d_end, ["B8", "B4"], "NDVI")
+        ndvi_change = ndvi_after.subtract(ndvi_before)
+        ndwi_change = ndwi_after.subtract(ndwi_before)
 
-    # NDWI
-    ndwi_before = safe_index(b_start, b_end, ["B3", "B8"], "NDWI")
-    ndwi_after = safe_index(d_start, d_end, ["B3", "B8"], "NDWI")
+        stats = ee.Image.cat([ndvi_change, ndwi_change]).reduceRegion(
+            reducer=ee.Reducer.mean(),
+            geometry=aoi,
+            scale=10,
+            maxPixels=1e13
+        )
 
-    if any(x is None for x in [ndvi_before, ndvi_after, ndwi_before, ndwi_after]):
+        ndvi = ee.Number(stats.get("NDVI", 0))
+        ndwi = ee.Number(stats.get("NDWI", 0))
+
+        return {
+            "ndvi_change": ndvi.getInfo(),
+            "ndwi_change": ndwi.getInfo()
+        }
+
+    except Exception:
         return None
 
-    ndvi_change = ee.Image(ndvi_after).subtract(ee.Image(ndvi_before))
-    ndwi_change = ee.Image(ndwi_after).subtract(ee.Image(ndwi_before))
-
-    stats = ee.Image.cat([ndvi_change, ndwi_change]).reduceRegion(
-        reducer=ee.Reducer.mean(),
-        geometry=aoi,
-        scale=10,
-        maxPixels=1e13
-    )
-
-    return {
-        "ndvi_change": stats.get("nd").getInfo(),
-        "ndwi_change": stats.get("NDWI").getInfo()
-    }
-
 # ----------------------------------
-# PDF GENERATION FUNCTION
+# PDF FUNCTION
 # ----------------------------------
 def generate_pdf(data):
-    file_name = "Crop_Damage_Verification_Report.pdf"
+    file_name = "Crop_Damage_Report.pdf"
     doc = SimpleDocTemplate(file_name, pagesize=A4)
     styles = getSampleStyleSheet()
     story = []
 
-    story.append(Paragraph("<b>Satellite-Based Crop Damage Verification Report</b>", styles["Title"]))
+    story.append(Paragraph("<b>Crop Damage Verification Report</b>", styles["Title"]))
     story.append(Spacer(1, 12))
 
-    for key, value in data.items():
-        story.append(Paragraph(f"<b>{key}:</b> {value}", styles["Normal"]))
+    for k, v in data.items():
+        story.append(Paragraph(f"<b>{k}:</b> {v}", styles["Normal"]))
         story.append(Spacer(1, 6))
-
-    story.append(Spacer(1, 12))
-    story.append(Paragraph(
-        "<i>This report uses NDVI (vegetation) and NDWI (water) indices from Sentinel-2 satellite data "
-        "and is intended to support insurance and government decision-making.</i>",
-        styles["Italic"]
-    ))
 
     doc.build(story)
     return file_name
 
 # ----------------------------------
-# RUN ANALYSIS
+# RUN
 # ----------------------------------
-st.markdown("### Run Damage Analysis")
+st.markdown("### Run Analysis")
 
 if st.button("🔍 Analyze Damage", use_container_width=True):
 
-    with st.spinner("Analyzing satellite data..."):
+    with st.spinner("Processing satellite data..."):
         results = analyze_damage(
             lat, lon, radius_km,
             baseline_start, baseline_end,
@@ -185,54 +160,41 @@ if st.button("🔍 Analyze Damage", use_container_width=True):
         )
 
     if results is None:
-        st.error("❌ No usable satellite data found for this location/date range.")
+        st.error("Satellite data unavailable for selected dates/area.")
         st.stop()
 
-    ndvi_change = results["ndvi_change"]
-    ndwi_change = results["ndwi_change"]
+    ndvi = results["ndvi_change"]
+    ndwi = results["ndwi_change"]
 
-    # RULE-BASED INTERPRETATION
-    if ndwi_change > 0.15:
+    if ndwi > 0.15:
         severity = "🔵 Flood / Waterlogging Detected"
-        explanation = "Water-sensitive index shows presence of surface water or inundation."
-    elif ndvi_change < -0.15:
+        explanation = "NDWI indicates surface water presence."
+    elif ndvi < -0.15:
         severity = "🟠 Vegetation Stress Detected"
-        explanation = "Vegetation index indicates crop stress or damage after the event."
+        explanation = "NDVI decline detected after event."
     else:
         severity = "🟢 No Significant Satellite-Visible Damage"
-        explanation = "No strong vegetation loss or water signal detected."
+        explanation = "No strong vegetation or water signal."
 
-    st.success("✅ Analysis Complete")
+    st.success("Analysis Complete")
 
-    col1, col2 = st.columns(2)
-    col1.metric("NDVI Change", round(ndvi_change, 3))
-    col2.metric("NDWI Change", round(ndwi_change, 3))
+    c1, c2 = st.columns(2)
+    c1.metric("NDVI Change", round(ndvi, 3))
+    c2.metric("NDWI Change", round(ndwi, 3))
 
-    st.info(f"Interpretation: {explanation}")
+    st.info(explanation)
 
-    # ----------------------------------
-    # PDF DOWNLOAD
-    # ----------------------------------
-    report_data = {
+    pdf = generate_pdf({
         "Latitude": lat,
         "Longitude": lon,
-        "Analysis Radius (km)": radius_km,
+        "Radius (km)": radius_km,
         "Baseline Period": f"{baseline_start} to {baseline_end}",
-        "Damage Assessment Period": f"{damage_start} to {damage_end}",
-        "NDVI Change": round(ndvi_change, 3),
-        "NDWI Change": round(ndwi_change, 3),
-        "Assessment Result": severity,
-        "Interpretation": explanation,
-        "Satellite Data": "Sentinel-2 (Optical)"
-    }
+        "Damage Period": f"{damage_start} to {damage_end}",
+        "NDVI Change": round(ndvi, 3),
+        "NDWI Change": round(ndwi, 3),
+        "Assessment": severity,
+        "Note": "Optical indices may miss floods; SAR recommended for confirmation."
+    })
 
-    pdf_file = generate_pdf(report_data)
-
-    with open(pdf_file, "rb") as f:
-        st.download_button(
-            label="Download Damage Verification Report (PDF)",
-            data=f,
-            file_name=pdf_file,
-            mime="application/pdf"
-        )
-
+    with open(pdf, "rb") as f:
+        st.download_button("Download PDF", f, pdf)
