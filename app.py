@@ -140,7 +140,7 @@ def analyze_damage(lat, lon, radius_km, b_start, b_end, d_start, d_end):
     )
 
     return {
-        "ndvi_change": stats.get("NDVI").getInfo(),
+        "ndvi_change": stats.get("nd").getInfo(),
         "ndwi_change": stats.get("NDWI").getInfo()
     }
 
@@ -235,3 +235,4 @@ if st.button("🔍 Analyze Damage", use_container_width=True):
             file_name=pdf_file,
             mime="application/pdf"
         )
+
