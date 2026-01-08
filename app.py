@@ -43,7 +43,7 @@ st.markdown("### Location Details")
 lat = st.number_input("Latitude", value=28.7041, format="%.6f")
 lon = st.number_input("Longitude", value=77.1025, format="%.6f")
 radius_km = st.selectbox(
-    "Analysis Area Radius",
+    "Analysis Area Radius(km)",
     options=[0.5, 1, 2],
     index=1,
     help="Smaller radius = more field-level accuracy"
@@ -221,3 +221,4 @@ if st.button("🔍 Analyze Damage", use_container_width=True):
             file_name=pdf_file,
             mime="application/pdf"
         )
+
