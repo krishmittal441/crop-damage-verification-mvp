@@ -70,8 +70,8 @@ with col1:
     baseline_start = st.date_input("Baseline Start", datetime.date(2023, 6, 1))
     baseline_end   = st.date_input("Baseline End", datetime.date(2023, 6, 20))
 with col2:
-    event_start = st.date_input("Event Start", datetime.date(2023, 7, 5))
-    event_end   = st.date_input("Event End", datetime.date(2023, 7, 30))
+    event_start = st.date_input("AfterEvent Start", datetime.date(2023, 7, 5))
+    event_end   = st.date_input("AfterEvent End", datetime.date(2023, 7, 30))
 
 if baseline_start >= baseline_end or event_start >= event_end:
     st.error("Invalid date ranges selected.")
@@ -333,4 +333,5 @@ if run:
             file_name=pdf,
             use_container_width=True
         )
+
 
