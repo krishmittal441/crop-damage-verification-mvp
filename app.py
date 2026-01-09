@@ -172,16 +172,47 @@ def analyze_drought(aoi):
         opt_a.normalizedDifference(["B8", "B4"]).rename("NDVI"), "NDVI", aoi
     )
 
-    ndvi_change = ndvi_after - ndvi_before if ndvi_before is not None and ndvi_after is not None else None
+    evi_before = safe_mean(
+        opt_b.expression(
+            "2.5*((NIR-RED)/(NIR+6*RED-7.5*BLUE+1))",
+            {
+                "NIR": opt_b.select("B8"),
+                "RED": opt_b.select("B4"),
+                "BLUE": opt_b.select("B2")
+            }
+        ).rename("EVI"),
+        "EVI",
+        aoi
+    )
 
-    if ndvi_change is not None and ndvi_change <= -0.2:
-        assessment = "Drought stress detected"
-        confidence = "High"
-    elif ndvi_change is not None and ndvi_change <= -0.1:
-        assessment = "Early vegetation stress"
-        confidence = "Medium"
+    evi_after = safe_mean(
+        opt_a.expression(
+            "2.5*((NIR-RED)/(NIR+6*RED-7.5*BLUE+1))",
+            {
+                "NIR": opt_a.select("B8"),
+                "RED": opt_a.select("B4"),
+                "BLUE": opt_a.select("B2")
+            }
+        ).rename("EVI"),
+        "EVI",
+        aoi
+    )
+
+    ndvi_change = ndvi_after - ndvi_before if ndvi_before is not None and ndvi_after is not None else None
+    evi_change  = evi_after - evi_before if evi_before is not None and evi_after is not None else None
+
+    if ndvi_change is not None and evi_change is not None:
+        if ndvi_change <= -0.20 and evi_change <= -0.15:
+            assessment = "Drought stress detected"
+            confidence = "High"
+        elif ndvi_change <= -0.10:
+            assessment = "Early vegetation stress"
+            confidence = "Medium"
+        else:
+            assessment = "No drought signal detected"
+            confidence = "Low"
     else:
-        assessment = "No drought signal detected"
+        assessment = "Insufficient optical data"
         confidence = "Low"
 
     return {
@@ -189,9 +220,12 @@ def analyze_drought(aoi):
         "NDVI Before": ndvi_before,
         "NDVI After": ndvi_after,
         "NDVI Change": ndvi_change,
+        "EVI Before": evi_before,
+        "EVI After": evi_after,
+        "EVI Change": evi_change,
         "Assessment": assessment,
         "Confidence": confidence,
-        "Explanation": "Vegetation stress assessed using NDVI trend over time."
+        "Explanation": "Drought assessment uses NDVI (greenness) and EVI (canopy robustness) to reduce soil and atmospheric noise."
     }
 
 def analyze_cyclone(aoi):
@@ -256,15 +290,14 @@ if run:
 
     elif event_type == "Drought":
         c1, c2, c3 = st.columns(3)
-        c1.metric("NDVI Before", round(results["NDVI Before"], 2) if results["NDVI Before"] is not None else "NA")
-        c2.metric("NDVI After", round(results["NDVI After"], 2) if results["NDVI After"] is not None else "NA")
-        c3.metric("NDVI Change", round(results["NDVI Change"], 2) if results["NDVI Change"] is not None else "NA")
-        st.caption(f"Confidence: {results['Confidence']}")
+        c1.metric("NDVI Change", round(results["NDVI Change"], 3) if results["NDVI Change"] is not None else "NA")
+        c2.metric("EVI Change", round(results["EVI Change"], 3) if results["EVI Change"] is not None else "NA")
+        c3.metric("Confidence", results["Confidence"])
 
-    else:  # Cyclone
+    else:
         c1, c2, c3 = st.columns(3)
         c1.metric("SAR VV Change (dB)", round(results["SAR Change (dB)"], 2) if results["SAR Change (dB)"] is not None else "NA")
-        c2.metric("NDVI Change", round(results["NDVI Change"], 2) if results["NDVI Change"] is not None else "NA")
+        c2.metric("NDVI Change", round(results["NDVI Change"], 3) if results["NDVI Change"] is not None else "NA")
         c3.metric("Confidence", results["Confidence"])
 
     st.subheader("4. Assessment")
