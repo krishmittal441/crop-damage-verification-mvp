@@ -43,7 +43,7 @@ with col1:
 with col2:
     radius_km = st.selectbox(
         "Analysis Radius (km)",
-        [1, 2, 5],
+        [0.5, 1, 2, 5],
         index=1,
         help="Larger radius improves satellite reliability"
     )
@@ -333,3 +333,4 @@ if run:
             file_name=pdf,
             use_container_width=True
         )
+
