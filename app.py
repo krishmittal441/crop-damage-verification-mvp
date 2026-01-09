@@ -2,197 +2,267 @@ import ee
 import streamlit as st
 import json
 import datetime
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.pagesizes import A4
 
 # ======================================================
-# EARTH ENGINE INITIALIZATION (SERVICE ACCOUNT)
+# EARTH ENGINE INIT
 # ======================================================
 service_account_info = json.loads(st.secrets["EE_SERVICE_ACCOUNT"])
-
 credentials = ee.ServiceAccountCredentials(
     service_account_info["client_email"],
     key_data=st.secrets["EE_SERVICE_ACCOUNT"]
 )
-
 ee.Initialize(credentials)
 
 # ======================================================
-# STREAMLIT CONFIG
+# STREAMLIT UI
 # ======================================================
-st.set_page_config(
-    page_title="Crop Damage Verification",
-    layout="centered"
-)
+st.set_page_config(page_title="CropVerify – Phase 1", layout="centered")
 
-st.title("🛰️ Satellite-Based Crop Damage Verification")
-st.subheader("Event-based, auditable damage assessment for government & insurance")
+st.title("🛰️ CropVerify – Phase 1")
+st.subheader("Event-based Satellite Crop Damage Verification")
 st.divider()
 
 # ======================================================
-# LOCATION INPUT
+# USER INPUTS
 # ======================================================
-st.markdown("### Location")
+event_type = st.selectbox(
+    "Event Type",
+    ["Flood", "Drought", "Cyclone"]
+)
 
 lat = st.number_input("Latitude", value=26.2, format="%.6f")
 lon = st.number_input("Longitude", value=93.8, format="%.6f")
 
-radius_km = st.selectbox(
-    "AOI Radius (km)",
-    options=[0.5, 1, 2],
-    index=2,
-    help="Larger AOI improves satellite availability"
-)
-
-# ======================================================
-# DATE INPUT
-# ======================================================
-st.markdown("### Dates")
+radius_km = st.selectbox("AOI Radius (km)", [1, 2, 5], index=1)
 
 baseline_start = st.date_input("Baseline Start", datetime.date(2023, 6, 1))
-baseline_end   = st.date_input("Baseline End",   datetime.date(2023, 6, 20))
+baseline_end   = st.date_input("Baseline End", datetime.date(2023, 6, 20))
 
-damage_start = st.date_input("Damage Start", datetime.date(2023, 7, 5))
-damage_end   = st.date_input("Damage End",   datetime.date(2023, 7, 30))
+event_start = st.date_input("Event Start", datetime.date(2023, 7, 5))
+event_end   = st.date_input("Event End", datetime.date(2023, 7, 30))
 
-if baseline_start >= baseline_end:
-    st.error("Baseline dates invalid")
-    st.stop()
-
-if damage_start >= damage_end:
-    st.error("Damage dates invalid")
-    st.stop()
-
-if damage_start <= baseline_end:
-    st.error("Damage period must start after baseline")
+if baseline_start >= baseline_end or event_start >= event_end:
+    st.error("Invalid date range")
     st.stop()
 
 # ======================================================
-# ANALYSIS FUNCTION
+# COMMON HELPERS
 # ======================================================
-def analyze_damage(lat, lon, radius_km, b_start, b_end, d_start, d_end):
+def get_aoi(lat, lon, radius_km):
+    return ee.Geometry.Point([lon, lat]).buffer(radius_km * 1000)
 
-    aoi = ee.Geometry.Point([lon, lat]).buffer(radius_km * 1000)
+def optical_composite(aoi, start, end):
+    col = (
+        ee.ImageCollection("COPERNICUS/S2_SR")
+        .filterBounds(aoi)
+        .filterDate(str(start), str(end))
+        .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 90))
+    )
+    return ee.Image(ee.Algorithms.If(col.size().gt(0), col.median(), None))
 
-    # ---------- OPTICAL (Sentinel-2) ----------
-    def optical_composite(start, end):
-        col = (
-            ee.ImageCollection("COPERNICUS/S2_SR")
-            .filterBounds(aoi)
-            .filterDate(str(start), str(end))
-            .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 90))
-        )
-
-        return ee.Image(
-            ee.Algorithms.If(
-                col.size().gt(0),
-                col.median(),
-                None
-            )
-        )
-
-    before_opt = optical_composite(b_start, b_end)
-    after_opt  = optical_composite(d_start, d_end)
-
-    ndvi_change = None
-    ndwi_change = None
-
-    if before_opt and after_opt:
-        ndvi_before = before_opt.normalizedDifference(["B8", "B4"])
-        ndvi_after  = after_opt.normalizedDifference(["B8", "B4"])
-
-        ndwi_before = before_opt.normalizedDifference(["B3", "B8"])
-        ndwi_after  = after_opt.normalizedDifference(["B3", "B8"])
-
-        diff = (
-            ndvi_after.subtract(ndvi_before)
-            .rename("NDVI")
-            .addBands(
-                ndwi_after.subtract(ndwi_before).rename("NDWI")
-            )
-        )
-
-        stats = diff.reduceRegion(
-            reducer=ee.Reducer.mean(),
-            geometry=aoi,
-            scale=10,
-            maxPixels=1e13
-        )
-
-        ndvi_val = stats.get("NDVI")
-        ndwi_val = stats.get("NDWI")
-
-        ndvi_change = ndvi_val.getInfo() if ndvi_val else None
-        ndwi_change = ndwi_val.getInfo() if ndwi_val else None
-
-    # ---------- SAR (Sentinel-1) ----------
-    sar_col = (
+def sar_composite(aoi, start, end):
+    col = (
         ee.ImageCollection("COPERNICUS/S1_GRD")
         .filterBounds(aoi)
-        .filterDate(str(d_start), str(d_end))
+        .filterDate(str(start), str(end))
         .filter(ee.Filter.eq("instrumentMode", "IW"))
         .filter(ee.Filter.listContains("transmitterReceiverPolarisation", "VV"))
         .select("VV")
     )
+    return ee.Image(ee.Algorithms.If(col.size().gt(0), col.mean(), None))
 
-    sar_change = None
-    if sar_col.size().gt(0):
-        sar = sar_col.mean()
-        sar_stats = sar.reduceRegion(
-            reducer=ee.Reducer.mean(),
-            geometry=aoi,
-            scale=10,
-            maxPixels=1e13
-        )
-        sar_val = sar_stats.get("VV")
-        sar_change = sar_val.getInfo() if sar_val else None
+def safe_mean(image, band, aoi):
+    stats = image.reduceRegion(
+        reducer=ee.Reducer.mean(),
+        geometry=aoi,
+        scale=10,
+        maxPixels=1e13
+    )
+    val = stats.get(band)
+    return val.getInfo() if val else None
+
+# ======================================================
+# EVENT-SPECIFIC ANALYSIS
+# ======================================================
+def analyze_flood(aoi):
+    sar_b = sar_composite(aoi, baseline_start, baseline_end)
+    sar_a = sar_composite(aoi, event_start, event_end)
+
+    opt_b = optical_composite(aoi, baseline_start, baseline_end)
+    opt_a = optical_composite(aoi, event_start, event_end)
+
+    sar_before = safe_mean(sar_b, "VV", aoi) if sar_b else None
+    sar_after  = safe_mean(sar_a, "VV", aoi) if sar_a else None
+    sar_change = sar_after - sar_before if sar_before and sar_after else None
+
+    ndwi_before = safe_mean(
+        opt_b.normalizedDifference(["B3", "B8"]).rename("NDWI"), "NDWI", aoi
+    ) if opt_b else None
+
+    ndwi_after = safe_mean(
+        opt_a.normalizedDifference(["B3", "B8"]).rename("NDWI"), "NDWI", aoi
+    ) if opt_a else None
+
+    ndwi_change = ndwi_after - ndwi_before if ndwi_before and ndwi_after else None
+
+    if sar_change is not None and sar_change <= -3:
+        assessment = "Open water flooding detected"
+        confidence = "High"
+    elif sar_change is not None and sar_change >= 1:
+        assessment = "Flooded standing crops detected"
+        confidence = "High"
+    elif ndwi_change is not None and ndwi_change >= 0.15:
+        assessment = "Surface water / waterlogging detected"
+        confidence = "Medium"
+    else:
+        assessment = "No strong flood signal"
+        confidence = "Low"
+
+    explanation = (
+        f"SAR VV changed by {sar_change:.2f} dB and NDWI changed by "
+        f"{ndwi_change:.2f} indicating flood-related surface moisture."
+        if sar_change is not None else "Insufficient SAR signal."
+    )
 
     return {
-        "NDVI Change": ndvi_change,
+        "SAR Before (dB)": sar_before,
+        "SAR After (dB)": sar_after,
+        "SAR Change (dB)": sar_change,
+        "NDWI Before": ndwi_before,
+        "NDWI After": ndwi_after,
         "NDWI Change": ndwi_change,
-        "SAR VV": sar_change
+        "Assessment": assessment,
+        "Confidence": confidence,
+        "Explanation": explanation
     }
+
+def analyze_drought(aoi):
+    opt_b = optical_composite(aoi, baseline_start, baseline_end)
+    opt_a = optical_composite(aoi, event_start, event_end)
+
+    ndvi_b = safe_mean(opt_b.normalizedDifference(["B8", "B4"]).rename("NDVI"), "NDVI", aoi)
+    ndvi_a = safe_mean(opt_a.normalizedDifference(["B8", "B4"]).rename("NDVI"), "NDVI", aoi)
+
+    evi_b = safe_mean(
+        opt_b.expression(
+            "2.5*((NIR-RED)/(NIR+6*RED-7.5*BLUE+1))",
+            {"NIR": opt_b.select("B8"), "RED": opt_b.select("B4"), "BLUE": opt_b.select("B2")}
+        ).rename("EVI"),
+        "EVI",
+        aoi
+    )
+
+    evi_a = safe_mean(
+        opt_a.expression(
+            "2.5*((NIR-RED)/(NIR+6*RED-7.5*BLUE+1))",
+            {"NIR": opt_a.select("B8"), "RED": opt_a.select("B4"), "BLUE": opt_a.select("B2")}
+        ).rename("EVI"),
+        "EVI",
+        aoi
+    )
+
+    ndvi_change = ndvi_a - ndvi_b
+    evi_change = evi_a - evi_b
+
+    if ndvi_change <= -0.2 and evi_change <= -0.15:
+        assessment = "Drought stress detected"
+        confidence = "High"
+    elif ndvi_change <= -0.1:
+        assessment = "Early vegetation stress"
+        confidence = "Medium"
+    else:
+        assessment = "No drought signal"
+        confidence = "Low"
+
+    return {
+        "NDVI Before": ndvi_b,
+        "NDVI After": ndvi_a,
+        "NDVI Change": ndvi_change,
+        "EVI Before": evi_b,
+        "EVI After": evi_a,
+        "EVI Change": evi_change,
+        "Assessment": assessment,
+        "Confidence": confidence,
+        "Explanation": "Vegetation stress evaluated using NDVI and EVI trends."
+    }
+
+def analyze_cyclone(aoi):
+    sar_b = sar_composite(aoi, baseline_start, baseline_end)
+    sar_a = sar_composite(aoi, event_start, event_end)
+
+    opt_b = optical_composite(aoi, baseline_start, baseline_end)
+    opt_a = optical_composite(aoi, event_start, event_end)
+
+    sar_change = (
+        safe_mean(sar_a, "VV", aoi) - safe_mean(sar_b, "VV", aoi)
+        if sar_a and sar_b else None
+    )
+
+    ndvi_change = (
+        safe_mean(opt_a.normalizedDifference(["B8", "B4"]).rename("NDVI"), "NDVI", aoi)
+        - safe_mean(opt_b.normalizedDifference(["B8", "B4"]).rename("NDVI"), "NDVI", aoi)
+    )
+
+    if sar_change and abs(sar_change) >= 2 and ndvi_change <= -0.2:
+        assessment = "Cyclone damage likely"
+        confidence = "High"
+    elif ndvi_change <= -0.15:
+        assessment = "Vegetation damage possible"
+        confidence = "Medium"
+    else:
+        assessment = "No strong cyclone damage"
+        confidence = "Low"
+
+    return {
+        "SAR Change (dB)": sar_change,
+        "NDVI Change": ndvi_change,
+        "Assessment": assessment,
+        "Confidence": confidence,
+        "Explanation": "Structural and vegetation damage assessed using SAR and NDVI."
+    }
+
+# ======================================================
+# PDF GENERATION
+# ======================================================
+def generate_pdf(results):
+    file_name = "CropVerify_Phase1_Report.pdf"
+    doc = SimpleDocTemplate(file_name, pagesize=A4)
+    styles = getSampleStyleSheet()
+    story = []
+
+    story.append(Paragraph("<b>Crop Damage Verification Report</b>", styles["Title"]))
+    story.append(Spacer(1, 12))
+
+    for k, v in results.items():
+        story.append(Paragraph(f"<b>{k}:</b> {v}", styles["Normal"]))
+        story.append(Spacer(1, 6))
+
+    doc.build(story)
+    return file_name
 
 # ======================================================
 # RUN ANALYSIS
 # ======================================================
 st.divider()
 
-if st.button("🔍 Analyze Damage", use_container_width=True):
+if st.button("🔍 Run Phase-1 Analysis", use_container_width=True):
 
-    with st.spinner("Analyzing satellite data…"):
-        results = analyze_damage(
-            lat, lon, radius_km,
-            baseline_start, baseline_end,
-            damage_start, damage_end
-        )
+    aoi = get_aoi(lat, lon, radius_km)
 
-    if not any(results.values()):
-        st.error(
-            "No usable satellite data found.\n\n"
-            "This usually happens due to extreme cloud cover.\n"
-            "SAR will be relied on in production."
-        )
-        st.stop()
+    with st.spinner("Running satellite analysis..."):
+        if event_type == "Flood":
+            results = analyze_flood(aoi)
+        elif event_type == "Drought":
+            results = analyze_drought(aoi)
+        else:
+            results = analyze_cyclone(aoi)
 
     st.success("Analysis complete")
+    st.json(results)
 
-    col1, col2, col3 = st.columns(3)
-
-    col1.metric("NDVI Change", results["NDVI Change"])
-    col2.metric("NDWI Change", results["NDWI Change"])
-    col3.metric("SAR VV", results["SAR VV"])
-
-    # ---------- INTERPRETATION ----------
-    if results["NDWI Change"] is not None and results["NDWI Change"] < -0.05:
-        verdict = "🌊 Flood / Excess Water Detected"
-    elif results["NDVI Change"] is not None and results["NDVI Change"] < -0.15:
-        verdict = "🌾 Vegetation Damage Detected"
-    elif results["SAR VV"] is not None:
-        verdict = "📡 SAR signal available (cloud-independent)"
-    else:
-        verdict = "ℹ️ No strong damage signal"
-
-    st.subheader("Assessment")
-    st.write(verdict)
+    pdf = generate_pdf(results)
+    with open(pdf, "rb") as f:
+        st.download_button("Download PDF Report", f, pdf)
